@@ -1,9 +1,4 @@
-# Stocks On V2.0 — Full Streamlit App (fixed import version)
-# Combines V1 features + XGBoost inference + SHAP explainability + walk-forward backtest helpers.
-# Notes:
-# - For best results, pre-train XGBoost models offline and place them in models/ as 'xgb_global.model' or 'xgb_{TICKER}.model'.
-# - If no XGBoost model found, the app falls back to RF+LR ensemble (like V1).
-# - Keep heavy training offline; this app focuses on inference, diagnostics, and explainability.
+# Stocks On V2.0 — Fixed output: shows Fundamentals Score and clearer momentum labels
 # Educational only. Not financial advice.
 
 import streamlit as st
@@ -19,7 +14,7 @@ from sklearn.metrics import mean_absolute_percentage_error
 import matplotlib.pyplot as plt
 import ta
 
-# --- Optional imports for V2 ---
+# Optional imports
 try:
     import xgboost as xgb
     from models.xgb_model import load_model as xgb_load_model, predict_from_df as xgb_predict_from_df
@@ -39,10 +34,8 @@ except Exception:
     shap = None
     explain_tree_model = lambda *a, **k: (None, None, None)
 
-# --- Streamlit page config ---
 st.set_page_config(page_title="Stocks On V2.0", layout="centered")
 
-# --- Styling ---
 st.markdown("""
 <style>
 body {background: linear-gradient(135deg, #071229 0%, #001219 100%); color: #E6EEF8}
@@ -55,7 +48,6 @@ body {background: linear-gradient(135deg, #071229 0%, #001219 100%); color: #E6E
 st.title("📈 Stocks On V2.0 — India Stock Predictor")
 st.markdown("V2.0: XGBoost-ready inference + SHAP explainability + improved diagnostics. Educational only.")
 
-# --- Sidebar inputs ---
 with st.sidebar:
     st.markdown("### Inputs")
     ticker_raw = st.text_input("Ticker (without suffix)", value="RELIANCE")
@@ -67,7 +59,6 @@ with st.sidebar:
     run_backtest = st.checkbox("Run quick backtest (may take time)", value=False)
     submit = st.button("Analyze")
 
-# --- Helpers ---
 @st.cache_data(show_spinner=False)
 def fetch_price_data(ticker, years=6):
     end = datetime.now(); start = end - timedelta(days=365*years)
@@ -90,7 +81,8 @@ def fetch_fmp_profile(ticker, apikey):
         if r.ok:
             j = r.json()
             if isinstance(j, list) and len(j)>0: return j[0]
-    except Exception: return None
+    except Exception:
+        return None
     return None
 
 def engineer_features(df):
@@ -147,11 +139,23 @@ def momentum_label(df):
         ret90 = (cp / df['Close'].iloc[-91] - 1) if len(df)>91 else np.nan
         rsi = ta.momentum.rsi(df['Close'], window=14).iloc[-1]
     except Exception:
-        ret30 = np.nan; ret90 = np.nan; rsi = 50
-    label = "Neutral / Sideways"
-    if not np.isnan(ret30) and ret30>0.12 and rsi>60: label = "Strong Uptrend"
-    elif not np.isnan(ret30) and ret30>0.04 and rsi>52: label = "Uptrend"
-    elif not np.isnan(ret30) and ret30<-0.05 and rsi<40: label = "Downtrend / Weak"
+        return "Insufficient data", np.nan, np.nan, np.nan
+
+    if not np.isnan(ret30):
+        if ret30 >= 0.12 and rsi > 60:
+            label = "Strong Uptrend"
+        elif ret30 >= 0.04 and rsi > 52:
+            label = "Uptrend"
+        elif -0.04 < ret30 < 0.04:
+            label = "Stable (sideways, low momentum)"
+        elif ret30 <= -0.05 and rsi < 40:
+            label = "Strong Downtrend"
+        elif ret30 <= -0.04:
+            label = "Downtrend"
+        else:
+            label = "Stable"
+    else:
+        label = "Insufficient data"
     return label, ret30, ret90, rsi
 
 def simple_recommendation(current_price, predicted_price, implied_return, momentum_label, fund_score, confidence, horizon_label):
@@ -173,7 +177,6 @@ def simple_recommendation(current_price, predicted_price, implied_return, moment
         text += "\n\nBeginner action: Hold/watch and set alerts."
     return decision, text
 
-# --- Quick backtest (RF+LR) ---
 def quick_backtest(X, y):
     tscv = TimeSeriesSplit(n_splits=3)
     mape_list=[]; diracc_list=[]
@@ -187,7 +190,7 @@ def quick_backtest(X, y):
         diracc_list.append(np.mean((np.sign(preds - Xte['Close'].values) == np.sign(yte.values - Xte['Close'].values)).astype(int))*100)
     return np.median(mape_list), np.median(diracc_list)
 
-# --- Main flow ---
+# Main
 if submit:
     ticker = ticker_raw.strip().upper()
     yf_ticker = ticker + '.NS' if auto_ns and '.' not in ticker else ticker
@@ -201,28 +204,30 @@ if submit:
 
         profile = fetch_fmp_profile(ticker if '.' not in ticker else ticker, fmp_key) if fmp_key else None
         yf_info = fetch_yf_info(yf_ticker)
-        description = profile.get('description') if profile else yf_info.get('longBusinessSummary') if yf_info else None
-        company_name = profile.get('companyName') if profile else yf_info.get('shortName') if yf_info else None
+        description = profile.get('description') if profile else (yf_info.get('longBusinessSummary') if yf_info else None)
+        company_name = profile.get('companyName') if profile else (yf_info.get('shortName') if yf_info else None)
 
         feats = engineer_features(price_df)
         X, y, df_full = prepare_data(feats, horizon)
         current_price = float(feats['Close'].iloc[-1])
 
-        # --- Prediction ---
-        predicted_price = None; used_model = 'RF+LR ensemble'
+        # Try XGBoost
+        predicted_price = None
         if XGBOOST_AVAILABLE and use_xgb:
             bst = None
             model_paths = [f"models/xgb_{ticker.upper()}.model", "models/xgb_global.model"]
             for p in model_paths:
                 if os.path.exists(p):
-                    bst = xgb.Booster(); bst.load_model(p); break
-            if bst:
+                    try:
+                        bst = xgb.Booster(); bst.load_model(p); break
+                    except Exception:
+                        bst = None
+            if bst is not None:
                 try:
                     preds_xgb = bst.predict(xgb.DMatrix(X.values))
                     predicted_price = float(preds_xgb[-1])
-                    used_model = f"XGBoost ({os.path.basename(p)})"
                 except Exception:
-                    pass
+                    predicted_price = None
 
         if predicted_price is None:
             rf = RandomForestRegressor(n_estimators=120, max_depth=6, random_state=42)
@@ -233,7 +238,7 @@ if submit:
 
         implied_return = (predicted_price/current_price-1)*100
 
-        # --- Diagnostics ---
+        # Diagnostics
         mape, diracc = quick_backtest(X,y)
         confidence = float(max(0, min(100, (diracc/100*0.6 + (100-min(mape,200))/100*0.3 + 0.1)*100)))
 
@@ -242,13 +247,13 @@ if submit:
 
         decision, rec_text = simple_recommendation(current_price, predicted_price, implied_return, mom_label, fund_score if fund_score else 50, confidence, interval)
 
-    # --- Output ---
+    # Output
     col1, col2 = st.columns(2)
     with col1:
         st.metric("Current price (₹)", f"{current_price:,.2f}")
         st.metric("Predicted price (₹)", f"{predicted_price:,.2f}", delta=f"{implied_return:.2f}%")
     with col2:
-        st.metric("Model", used_model)
+        st.metric("Fundamentals score", f"{fund_score if fund_score is not None else 'N/A'}/100")
         st.metric("Confidence", f"{confidence:.1f}%")
 
     st.markdown("### Company")
@@ -256,13 +261,15 @@ if submit:
     if description: st.caption(description)
 
     st.markdown("### Momentum & Backtest")
-    st.write(f"- Momentum: {mom_label} (30d: {ret30*100:.2f}%, 90d: {ret90*100:.2f}%, RSI: {rsi:.1f})")
+    def fmt(x):
+        return f"{x*100:.2f}%" if x is not None and not (x is np.nan) and not pd.isna(x) else "N/A"
+    st.write(f"- Momentum: **{mom_label}** (30d: {fmt(ret30)}, 90d: {fmt(ret90)}, RSI: {rsi:.1f if rsi is not None and not np.isnan(rsi) else 'N/A'})")
     st.write(f"- Quick backtest — MAPE: {mape:.2f}% | Directional accuracy: {diracc:.1f}%")
 
     st.markdown("### Recommendation")
     st.info(rec_text)
 
-    if SHAP_AVAILABLE and used_model.startswith("XGBoost") and show_shap:
+    if SHAP_AVAILABLE and show_shap:
         try:
             shap_fig, shap_values, explainer = explain_tree_model(bst, X.tail(100), max_display=10, plot_type="bar")
             st.markdown("### SHAP Explanation (Top features)")
