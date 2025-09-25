@@ -1,4 +1,4 @@
-# Stocks On V2.0 — Fixed output: shows Fundamentals Score and clearer momentum labels
+# Stocks On V2.0 — Fixed RSI formatting and SHAP safety checks
 # Educational only. Not financial advice.
 
 import streamlit as st
@@ -213,8 +213,8 @@ if submit:
 
         # Try XGBoost
         predicted_price = None
+        bst = None  # ensure bst exists in this scope for SHAP check later
         if XGBOOST_AVAILABLE and use_xgb:
-            bst = None
             model_paths = [f"models/xgb_{ticker.upper()}.model", "models/xgb_global.model"]
             for p in model_paths:
                 if os.path.exists(p):
@@ -229,6 +229,7 @@ if submit:
                 except Exception:
                     predicted_price = None
 
+        # Fallback RF+LR ensemble
         if predicted_price is None:
             rf = RandomForestRegressor(n_estimators=120, max_depth=6, random_state=42)
             lr = LinearRegression()
@@ -263,13 +264,15 @@ if submit:
     st.markdown("### Momentum & Backtest")
     def fmt(x):
         return f"{x*100:.2f}%" if x is not None and not (x is np.nan) and not pd.isna(x) else "N/A"
-    st.write(f"- Momentum: **{mom_label}** (30d: {fmt(ret30)}, 90d: {fmt(ret90)}, RSI: {rsi:.1f if rsi is not None and not np.isnan(rsi) else 'N/A'})")
+    rsi_str = f"{rsi:.1f}" if (rsi is not None and not np.isnan(rsi)) else "N/A"
+    st.write(f"- Momentum: **{mom_label}** (30d: {fmt(ret30)}, 90d: {fmt(ret90)}, RSI: {rsi_str})")
     st.write(f"- Quick backtest — MAPE: {mape:.2f}% | Directional accuracy: {diracc:.1f}%")
 
     st.markdown("### Recommendation")
     st.info(rec_text)
 
-    if SHAP_AVAILABLE and show_shap:
+    # SHAP: only if SHAP is available and a loaded xgboost model exists
+    if SHAP_AVAILABLE and bst is not None and show_shap:
         try:
             shap_fig, shap_values, explainer = explain_tree_model(bst, X.tail(100), max_display=10, plot_type="bar")
             st.markdown("### SHAP Explanation (Top features)")
